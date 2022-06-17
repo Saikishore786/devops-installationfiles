@@ -1,0 +1,60 @@
+pipeline {
+    agent any
+    environment {
+        BarCreation = "/opt/ace-11.0.0.7/tools/mqsicreatebar"
+        ArtifactsPath = "/home/openshiftadmin/Artifacts"
+        route = "$route"
+        cp4iconfig = "$WORKSPACE/BARfiles/CP4I_Configuration/INT"
+        SERVER_CONF = "$SERVER_CONF"
+        COMMITID = "$GIT_COMMIT"
+        Conditions = "/home"
+    }
+    stages {
+        stage('git') {
+            steps {
+                 git branch: 'main', url: 'https://github.com/manojawsdevops/devops_cicd.git'
+            }
+        }
+        stage('Creating and overriding bar'){
+            steps {
+                sh 'echo Creating and Overriding BAR'
+                sh '$BarCreation -data $WORKSPACE -b $ArtifactsPath/$Application_Name#$BUILD_NUMBER.bar -a $Application_Name -cleanbuild'
+                sh ' . /opt/ace-11.0.0.7/server/bin/mqsiprofile && mqsiapplybaroverride -b $ArtifactsPath/$Application_Name#$BUILD_NUMBER.bar -p $WORKSPACE/BARfiles/Properties/INT/INT_$Application_Name.properties -r'
+                sh 'mv $ArtifactsPath/$Application_Name#$BUILD_NUMBER.bar $cp4iconfig/'
+            }
+        }
+        stage('Docker Build') {
+            steps {
+                sh 'cd $cp4iconfig && mv Policies.zip Policies.bar'
+                sh 'Image_Name=${Image_Name,,}'
+                sh 'Image_Name_32=${Image_Name:0:32}'
+                sh 'docker build -t $Image_Name_32:$COMMITID-$BUILD_NUMBER --build-arg Application=$Application_Name#$BUILD_NUMBER.bar --build-arg server_conf=$SERVER_CONF -f docker.ace .'
+                sh '/usr/local/bin/oc login https://api.intcluster.intocp.deloitte.com:6443 -u $kubeadmin -p $kubeadmin_pwd --insecure-skip-tls-verify=true'
+                sh 'cd /usr/local/bin/ && docker login https://default-route-openshift-image-registry.apps.intcluster.intocp.deloitte.com -u kubeadmin -p $(./oc whoami -t)'
+                sh 'docker tag $Image_Name_32:$COMMITID-$BUILD_NUMBER default-route-openshift-image-registry.apps.intcluster.intocp.deloitte.com/int-cp4i/$Image_Name_32:$COMMITID-$BUILD_NUMBER'
+                sh 'docker push default-route-openshift-image-registry.apps.intcluster.intocp.deloitte.com/int-cp4i/$Image_Name_32:$COMMITID-$BUILD_NUMBER'
+                sh 'docker rmi default-route-openshift-image-registry.apps.intcluster.intocp.deloitte.com/int-cp4i/$Image_Name_32:$COMMITID-$BUILD_NUMBER'
+                sh 'docker rmi $Image_Name_32:$COMMITID-$BUILD_NUMBER'
+                sh 'cp $cp4iconfig/ace-deploy.yaml $cp4iconfig/ace-deploy-$BUILD_NUMBER.yaml'
+                sh '$Conditions/script1.sh'
+                sh 'sed -i -e "s/{{Application_Name}}/$Image_Name_32/g" $cp4iconfig/ace-deploy-$BUILD_NUMBER.yaml' 
+                sh 'sed -i -e "s/{{Image_Name}}/$Image_Name_32/g" $cp4iconfig/ace-deploy-$BUILD_NUMBER.yaml'  
+                sh 'sed -i -e "s/{{BUILD_NUMBER}}/$COMMITID-$BUILD_NUMBER/g" $cp4iconfig/ace-deploy-$BUILD_NUMBER.yaml'
+                sh '$Conditions/script2.sh'
+            }
+        }
+        stage('HPA') {
+            steps {
+                sh 'cp $cp4iconfig/HPA.yaml $cp4iconfig/HPA-$BUILD_NUMBER.yaml'
+                sh 'sed -i -e "s/{{Image_Name}}/$Image_Name/g" $cp4iconfig/HPA-$BUILD_NUMBER.yaml'
+                sh 'sed -i -e "s/{{Image_Name_32}}/$Image_Name_32/g" $cp4iconfig/HPA-$BUILD_NUMBER.yaml'
+            }
+        }
+        stage('Removing TEMP YAML files') {
+            steps {
+                sh 'rm -rf $cp4iconfig/ace-deploy-$BUILD_NUMBER.yaml && rm -rf $cp4iconfig/Route-$BUILD_NUMBER.yaml && rm -rf $cp4iconfig/HPA-$BUILD_NUMBER.yaml'
+            }
+        }
+        
+    }
+}
